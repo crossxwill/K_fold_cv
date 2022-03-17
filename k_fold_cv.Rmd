@@ -1,0 +1,147 @@
+---
+title: "K-Fold CV Simulation"
+author: "William Chiu"
+date: "3/14/2022"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(splines)
+library(Metrics)
+library(boot)
+library(furrr)
+library(purrr)
+
+future::plan(multisession, workers=3)
+
+K_try <- c(3, 5, 10, 150)
+p_sims <- 25000
+```
+
+## Intro
+
+A study to examine the trade-offs associated with increasing the $K$ in K-Fold cross-validation. Sometimes referred to as V-fold cross-validation.
+
+Values of $K$: 3-fold, 5-fold, 10-fold, and leave-one-out.
+
+## Simulating one data set
+
+```{r}
+
+nobs <- 200
+K_param <- 5
+seedVal <- 123
+
+set.seed(seedVal)
+
+x1 <- rnorm(nobs, 1, 2)
+x2 <- rnorm(nobs, 2, 4)
+
+y <- 5 + 5*x1 + 2*x2 - 0.8*x2^2 + rnorm(nobs,0,6)
+
+full_data <- data.frame(y=y, x1=x1, x2=x2)
+
+rm(y, x1, x2)
+
+trainID <- sample(1:nobs, size=150)
+
+trainData <- full_data[trainID,]
+testData <- full_data[-trainID,]
+
+lm_mod <- glm(y ~ x1 + x2, data=trainData, family=gaussian)
+
+test_preds <- predict(lm_mod, newdata=testData)
+
+test_MSE <- mse(testData$y, test_preds)
+
+cv_MSE <- cv.glm(trainData, lm_mod, K=K_param)$delta[1]
+
+outdf <- data.frame(Iter=seedVal, K=K_param, test_MSE=test_MSE, cv_MSE=cv_MSE)
+
+knitr::kable(outdf)
+```
+## Simulate many data sets
+
+```{r}
+doOne <- function(K_param, seedVal) {
+  nobs <- 200
+  
+  set.seed(seedVal)
+  
+  x1 <- rnorm(nobs, 1, 2)
+  x2 <- rnorm(nobs, 2, 4)
+  
+  y <- 5 + 5*x1 + 2*x2 - 0.8*x2^2 + rnorm(nobs,0,6)
+  
+  full_data <- data.frame(y=y, x1=x1, x2=x2)
+  
+  rm(y, x1, x2)
+  
+  trainID <- sample(1:nobs, size=150)
+  
+  trainData <- full_data[trainID,]
+  testData <- full_data[-trainID,]
+  
+  lm_mod <- glm(y ~ x1 + x2, data=trainData, family=gaussian)
+  
+  test_preds <- predict(lm_mod, newdata=testData)
+  
+  test_MSE <- mse(testData$y, test_preds)
+  
+  cv_MSE <- cv.glm(trainData, lm_mod, K=K_param)$delta[1]
+  
+  outdf <- data.frame(Iter=seedVal, K=K_param, test_MSE=test_MSE, cv_MSE=cv_MSE)
+  
+  outdf
+}
+
+grid <- expand.grid(K_param=K_try, seedVal=seq(p_sims))
+
+allSims_df <- future_map2_dfr(.x=grid$K_param, .y=grid$seedVal, .f=doOne,
+                              .options=furrr_options(seed=NULL))
+
+future:::ClusterRegistry("stop")
+
+knitr::kable(head(allSims_df))
+```
+
+```{r}
+allSim_df_wide <- pivot_wider(allSims_df, id_cols=c(Iter, test_MSE), names_from=K,
+                              values_from=cv_MSE, names_prefix="cv_")
+
+knitr::kable(head(allSim_df_wide))
+
+allSim_df_long <- pivot_longer(allSim_df_wide, -Iter, names_to='Method', values_to = 'MSE')
+
+knitr::kable(head(allSim_df_long))
+
+allSim_df_long$Method <- factor(allSim_df_long$Method, levels=c("cv_3", "cv_5",
+                                                  "cv_10", "cv_150", "test_MSE"))
+```
+
+```{r}
+unbiased_MSE <- allSim_df_long %>% 
+  filter(Method=='test_MSE') %>% 
+  summarize(meanTestMSE = mean(MSE), .groups = 'drop') %>% 
+  as.numeric()
+
+ggplot(allSim_df_long, aes(x=Method, y=MSE, color=Method)) +
+  geom_boxplot(fatten = NULL, alpha=0.6) +
+  stat_summary(fun = mean, geom = "errorbar", aes(ymax = ..y.., ymin = ..y..),
+               width = 0.75, size = 1, linetype = "solid") +
+  geom_hline(yintercept=unbiased_MSE, linetype="dashed", color = "black") 
+```
+
+```{r}
+out <- allSim_df_long %>% 
+  group_by(Method) %>% 
+  summarize(AvgMSE=mean(MSE), SD=sd(MSE), .groups = 'drop')
+
+knitr::kable(out)
+```
+
